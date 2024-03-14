@@ -3,14 +3,33 @@
 #[path = "./camera_controller.rs"]
 mod camera_controller;
 
+#[path = "./spatial_index.rs"]
+mod spatial_index;
+
 use bevy::{
     asset::LoadState, core_pipeline::Skybox, input::common_conditions::input_just_pressed, math::Vec3A, prelude::*, render::{
         primitives::Aabb, render_resource::{TextureViewDescriptor, TextureViewDimension}
-    }, window::{close_on_esc, WindowMode}
+    }, window::{close_on_esc, PrimaryWindow, WindowMode}
 };
 use camera_controller::{CameraController, CameraControllerPlugin};
+use spatial_index::*;
 use std::f32::consts::PI;
 use rand::prelude::*;
+
+
+#[derive(Resource)]
+struct SkyboxResource {
+    is_loaded: bool,
+    image_handle: Handle<Image>,
+}
+
+#[derive(Resource)]
+struct CursorPosition {
+    position: Vec3,
+}
+
+
+
 
 
 #[derive(Component)]
@@ -28,9 +47,9 @@ fn move_by_velocity(
     mut query: Query<(&mut Transform, &Velocity)>,
     mut gizmos: Gizmos
 ) {
-    gizmos.arrow(Vec3::ZERO, Vec3::X * 10.0, Color::RED);
-    gizmos.arrow(Vec3::ZERO, Vec3::Y * 10.0, Color::GREEN);
-    gizmos.arrow(Vec3::ZERO, Vec3::Z * 10.0, Color::BLUE);
+    gizmos.arrow(Vec3::ZERO, Vec3::X * 20.0, Color::RED);
+    gizmos.arrow(Vec3::ZERO, Vec3::Y * 20.0, Color::GREEN);
+    gizmos.arrow(Vec3::ZERO, Vec3::Z * 20.0, Color::BLUE);
 
     for (mut transform, velocity) in &mut query {
         transform.translation += velocity.velocity.normalize() * time.delta_seconds();
@@ -39,17 +58,25 @@ fn move_by_velocity(
         transform.rotation = transform.rotation.lerp(target.rotation, velocity.turn_speed * time.delta_seconds());
 
         gizmos.arrow(transform.translation, transform.translation + velocity.velocity, Color::WHITE);
-        //gizmos.arrow(transform.translation, transform.translation + Vec3::Z*3.0, Color::YELLOW);
     }
 }
+
 
 
 fn update_velocity(
     time: Res<Time>,
     mut query: Query<(&Transform, &mut Velocity)>,
 ) {
-    for (transform, mut velocity) in &mut query {
-    }
+    /*let mut sum = Vec3::ZERO;
+    let mut iter = query.iter_combinations_mut();
+    while let Some([(trans1, mut vel1), (trans2, mut vel2)]) = iter.fetch_next() {
+        let d = trans2.translation - trans1.translation;
+        let len = d.length();
+        if len > 20.0 {
+            continue
+        }
+        let dnorm = d.normalize_or_zero() / len;
+    }*/
 }
 
 
@@ -98,8 +125,12 @@ fn main() {
                 toggle_pause.run_if(input_just_pressed(KeyCode::Space)),
                 update_velocity,
                 move_by_velocity.after(update_velocity),
+                update_cell_association,
+                update_spatial_index.after(update_cell_association),
                 adjust_by_aabb,
                 skybox_system,
+                test_spatial_index,
+                update_cursor_ground_plane_position,
                 close_on_esc
             ),
         )
@@ -109,7 +140,6 @@ fn main() {
 
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    // directional 'sun' light
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
             illuminance: 32000.0,
@@ -120,14 +150,18 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         ..default()
     });
     
-    // skybox resource
     let image_handle = asset_server.load("space_cubemap.png");
     commands.insert_resource(SkyboxResource {
         is_loaded: false,
         image_handle: image_handle.clone(),
     });
 
-    // camera
+    commands.insert_resource(SpatialIndex::new());
+
+    commands.insert_resource(CursorPosition {
+        position: Vec3::ZERO,
+    });
+
     commands.spawn((
         Camera3dBundle {
             transform: Transform::from_xyz(0.0, 10.0, 0.0).looking_at(Vec3::new(10.0, 0.0, 10.0), Vec3::Y),
@@ -169,6 +203,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 fn spawn_ship(commands: &mut Commands, scene: Handle<Scene>, position: Vec3, velocity: Vec3, angle: f32, scale: f32) {
     commands.spawn((
+        CellAssociation::new(),
         SpatialBundle {
             transform: Transform::from_translation(position),
             ..default()
@@ -176,7 +211,7 @@ fn spawn_ship(commands: &mut Commands, scene: Handle<Scene>, position: Vec3, vel
         Velocity {
             velocity,
             max_velocity: 10.0,
-            turn_speed: 1.0
+            turn_speed: 1.0,
         }
     )).with_children(|parent| {
         parent.spawn((
@@ -191,11 +226,6 @@ fn spawn_ship(commands: &mut Commands, scene: Handle<Scene>, position: Vec3, vel
 }
 
 
-#[derive(Resource)]
-struct SkyboxResource {
-    is_loaded: bool,
-    image_handle: Handle<Image>,
-}
 
 fn skybox_system(
     asset_server: Res<AssetServer>,
@@ -226,122 +256,22 @@ fn toggle_pause(mut time: ResMut<Time<Virtual>>) {
     }
 }
 
-
-
-/*use bevy::{log::LogPlugin, prelude::*, window::PrimaryWindow};
-use bevy_spatial::{
-    kdtree::KDTree3, AutomaticUpdate, SpatialAccess, SpatialStructure, TransformMode,
-};
-use std::time::Duration;
-
-
-#[derive(Component, Default)]
-struct NearestNeighbour;
-
-#[derive(Component)]
-struct MoveTowards;
-
-
-
-#[derive(Resource)]
-struct RvoContext {
-}
-
-#[derive(Component)]
-struct Velocity {
-    velocity: Vec3,
-    max_velocity: f32,
-    agent: usize,
-}
-
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.build().disable::<LogPlugin>())
-        .add_plugins(
-            AutomaticUpdate::<NearestNeighbour>::new()
-                .with_spatial_ds(SpatialStructure::KDTree3)
-                .with_frequency(Duration::from_secs(1))
-                .with_transform(TransformMode::Transform),
-        )
-        .add_systems(Startup, setup)
-        .add_systems(Update, mouseclick)
-        .add_systems(Update, move_to)
-        .run();
-}
-
-type NNTree = KDTree3<NearestNeighbour>;
-
-fn setup(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default());
-    for x in -6..6 {
-        for y in -6..6 {
-            commands.spawn((
-                NearestNeighbour,
-                SpriteBundle {
-                    sprite: Sprite {
-                        color: Color::rgb(0.7, 0.3, 0.5),
-                        custom_size: Some(Vec2::new(10.0, 10.0)),
-                        ..default()
-                    },
-                    transform: Transform {
-                        translation: Vec3::new((x * 100) as f32, (y * 100) as f32, 0.0),
-                        ..default()
-                    },
-                    ..default()
-                },
-            ));
-        }
-    }
-}
-
-fn mouseclick(
-    mut commands: Commands,
-    mouse_input: Res<ButtonInput<MouseButton>>,
-    window: Query<&Window, With<PrimaryWindow>>,
-    cam: Query<(&Camera, &GlobalTransform)>,
+fn update_cursor_ground_plane_position(
+    mut cursor: ResMut<CursorPosition>,
+    q_window: Query<&Window, With<PrimaryWindow>>,
+    q_camera: Query<(&Camera, &GlobalTransform)>,
 ) {
-    let win = window.single();
-    let (cam, cam_t) = cam.single();
-    if mouse_input.just_pressed(MouseButton::Left) {
-        if let Some(pos) = win.cursor_position() {
-            commands.spawn((
-                MoveTowards,
-                Velocity {
-                    velocity: Vec3::ZERO,
-                    max_velocity: 10.0,
-                    agent: 0,
-                },
-                SpriteBundle {
-                    sprite: Sprite {
-                        color: Color::rgb(0.15, 0.15, 1.0),
-                        custom_size: Some(Vec2::new(10.0, 10.0)),
-                        ..default()
-                    },
-                    transform: Transform {
-                        translation: cam
-                            .viewport_to_world_2d(cam_t, pos)
-                            .unwrap_or(Vec2::ZERO)
-                            .extend(0.0),
-                        ..default()
-                    },
-                    ..default()
-                },
-            ));
-        }
-    }
+    let (camera, camera_transform) = q_camera.single();
+    let window = q_window.single();
+    let Some(cursor_position) = window.cursor_position() else {
+        return;
+    };
+    let plane = Plane3d::new(Vec3::Y);
+    let Some(ray) = camera.viewport_to_world(camera_transform, cursor_position) else {
+        return;
+    };
+    let Some(distance) = ray.intersect_plane(Vec3::ZERO, plane) else {
+        return;
+    };
+    cursor.position = ray.get_point(distance);
 }
-
-fn move_to(
-    tree: Res<NNTree>,
-    time: Res<Time>,
-    mut query: Query<&mut Transform, With<MoveTowards>>,
-) {
-    for mut transform in &mut query {
-        if let Some(nearest) = tree.nearest_neighbour(transform.translation) {
-            let towards = nearest.0 - transform.translation;
-            transform.translation += towards.normalize() * time.delta_seconds() * 64.0;
-        }
-    }
-}
-*/

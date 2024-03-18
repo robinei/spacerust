@@ -23,6 +23,9 @@ struct SkyboxResource {
     image_handle: Handle<Image>,
 }
 
+#[derive(Component)]
+struct ModelEntity;
+
 #[derive(Resource)]
 struct CursorPosition {
     position: Vec3,
@@ -30,53 +33,168 @@ struct CursorPosition {
 
 
 
+fn limit(v: Vec3, len: f32) -> Vec3 {
+    if v.length() > len {
+        return v.normalize() * len;
+    }
+    return v;
+}
 
 
 #[derive(Component)]
 struct Velocity {
     velocity: Vec3,
     max_velocity: f32,
+    max_force: f32,
     turn_speed: f32,
 }
 
 #[derive(Component)]
-struct ModelEntity;
+struct Acceleration {
+    acceleration: Vec3,
+}
+
+
+
+const BOID_RADIUS: f32 = 20.0;
+
+struct Boid<'a> {
+    transform: &'a Transform,
+    velocity: &'a Velocity,
+
+    sep_sum: Vec3,
+    sep_count: i32,
+
+    align_sum: Vec3,
+    align_count: i32,
+
+    cohesion_sum: Vec3,
+    cohesion_count: i32,
+}
+
+impl<'a> Boid<'a> {
+    fn new(transform: &'a Transform, velocity: &'a Velocity) -> Self {
+        Self {
+            transform,
+            velocity,
+            sep_sum: Vec3::ZERO,
+            sep_count: 0,
+            align_sum: Vec3::ZERO,
+            align_count: 0,
+            cohesion_sum: Vec3::ZERO,
+            cohesion_count: 0,
+        }
+    }
+
+    fn add_other(&mut self, transform: &Transform, velocity: &Velocity) {
+        let delta = self.transform.translation - transform.translation;
+        let dist = delta.length();
+        if dist > BOID_RADIUS || dist < 0.001 {
+            return
+        }
+
+        if dist < 10.0 {
+            self.sep_sum += delta.normalize() / dist;
+            self.sep_count += 1;
+        }
+        
+        if dist < 20.0 {
+            self.align_sum += velocity.velocity;
+            self.align_count += 1;
+        }
+
+        if dist < 20.0 {
+            self.cohesion_sum += transform.translation;
+            self.cohesion_count += 1;
+        }
+    }
+
+    fn get_acceleration(&self) -> Vec3 {
+        let mut sum = Vec3::ZERO;
+        if self.sep_count > 0 {
+            sum += self.steer(self.sep_sum / (self.sep_count as f32));
+        }
+        if self.align_count > 0 {
+            sum += self.steer(self.align_sum / (self.align_count as f32));
+        }
+        if self.cohesion_count > 0 {
+            sum += self.seek(self.cohesion_sum / (self.cohesion_count as f32));
+        }
+        sum
+    }
+
+    fn seek(&self, target: Vec3) -> Vec3 {
+        return self.steer(target - self.transform.translation);
+    }
+
+    fn steer(&self, dir: Vec3) -> Vec3 {
+        let len = dir.length();
+        if len < 0.000001 {
+            return Vec3::ZERO;
+        }
+        let adjusted_dir = dir * (self.velocity.max_velocity / len);
+        return limit(adjusted_dir - self.velocity.velocity, self.velocity.max_force);
+    }
+
+    fn arrive(&self, target: Vec3) -> Vec3 {
+        let brakelimit = 50.0;
+        let mut desired = target - self.transform.translation;
+        let len = desired.length();
+        if len < 0.000001 {
+            return Vec3::ZERO;
+        }
+        desired /= len;
+        if len < brakelimit {
+            desired *= (len / brakelimit) * self.velocity.max_velocity;
+        } else {
+            desired *= self.velocity.max_velocity;
+        }
+        return limit(desired, self.velocity.max_force);
+    }
+}
+
+
+fn calc_acceleration(
+    cursor: Res<CursorPosition>,
+    index: Res<SpatialIndex>,
+    mut query: Query<(Entity, &Transform, &Velocity, &mut Acceleration)>,
+    lookup_query: Query<(&Transform, &Velocity)>,
+) {
+    for (entity1, trans1, vel1, mut acc) in &mut query {
+        let mut boid = Boid::new(trans1, vel1);
+        index.query(trans1.translation, BOID_RADIUS, |entity2| {
+            if entity1 != entity2 {
+                if let Ok((trans2, vel2)) = lookup_query.get(entity2) {
+                    boid.add_other(trans2, vel2);
+                }
+            }
+        });
+        acc.acceleration = boid.get_acceleration() + boid.steer(cursor.position - trans1.translation);
+    }
+}
 
 fn move_by_velocity(
     time: Res<Time>,
-    mut query: Query<(&mut Transform, &Velocity)>,
+    mut query: Query<(&mut Transform, &mut Velocity, &Acceleration)>,
     mut gizmos: Gizmos
 ) {
     gizmos.arrow(Vec3::ZERO, Vec3::X * 20.0, Color::RED);
     gizmos.arrow(Vec3::ZERO, Vec3::Y * 20.0, Color::GREEN);
     gizmos.arrow(Vec3::ZERO, Vec3::Z * 20.0, Color::BLUE);
 
-    for (mut transform, velocity) in &mut query {
-        transform.translation += velocity.velocity.normalize() * time.delta_seconds();
+    for (mut transform, mut vel, acc) in &mut query {
+        vel.velocity += acc.acceleration * time.delta_seconds();
+        vel.velocity = limit(vel.velocity, vel.max_velocity);
+        vel.velocity.y = 0.0;
 
-        let target = transform.looking_to(-velocity.velocity, Vec3::Y);
-        transform.rotation = transform.rotation.lerp(target.rotation, velocity.turn_speed * time.delta_seconds());
+        transform.translation += vel.velocity * time.delta_seconds();
+        transform.translation.y = 0.0;
 
-        gizmos.arrow(transform.translation, transform.translation + velocity.velocity, Color::WHITE);
+        let target = transform.looking_to(-vel.velocity, Vec3::Y);
+        transform.rotation = transform.rotation.lerp(target.rotation, vel.turn_speed * time.delta_seconds());
+
+        //gizmos.arrow(transform.translation, transform.translation + vel.velocity, Color::WHITE);
     }
-}
-
-
-
-fn update_velocity(
-    time: Res<Time>,
-    mut query: Query<(&Transform, &mut Velocity)>,
-) {
-    /*let mut sum = Vec3::ZERO;
-    let mut iter = query.iter_combinations_mut();
-    while let Some([(trans1, mut vel1), (trans2, mut vel2)]) = iter.fetch_next() {
-        let d = trans2.translation - trans1.translation;
-        let len = d.length();
-        if len > 20.0 {
-            continue
-        }
-        let dnorm = d.normalize_or_zero() / len;
-    }*/
 }
 
 
@@ -123,8 +241,8 @@ fn main() {
             Update,
             (
                 toggle_pause.run_if(input_just_pressed(KeyCode::Space)),
-                update_velocity,
-                move_by_velocity.after(update_velocity),
+                calc_acceleration,
+                move_by_velocity.after(calc_acceleration),
                 update_cell_association,
                 update_spatial_index.after(update_cell_association),
                 adjust_by_aabb,
@@ -208,9 +326,13 @@ fn spawn_ship(commands: &mut Commands, scene: Handle<Scene>, position: Vec3, vel
             transform: Transform::from_translation(position),
             ..default()
         },
+        Acceleration {
+            acceleration: Vec3::ZERO,
+        },
         Velocity {
             velocity,
             max_velocity: 10.0,
+            max_force: 1.0,
             turn_speed: 1.0,
         }
     )).with_children(|parent| {

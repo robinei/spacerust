@@ -16,6 +16,10 @@ pub struct SpatialIndex {
 }
 
 #[derive(Component)]
+#[component(storage = "SparseSet")]
+pub struct HasDirtyCell;
+
+#[derive(Component)]
 pub struct CellAssociation {
     cell: Cell,
     new_cell: Cell,
@@ -29,10 +33,6 @@ impl CellAssociation {
         }
     }
 }
-
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub struct HasDirtyCell;
 
 impl SpatialIndex {
     pub fn new() -> Self {

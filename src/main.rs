@@ -23,23 +23,16 @@ struct SkyboxResource {
     image_handle: Handle<Image>,
 }
 
-#[derive(Component)]
-struct ModelEntity;
-
 #[derive(Resource)]
 struct CursorPosition {
     position: Vec3,
 }
 
+#[derive(Component)]
+struct UnadjustedAABB;
 
-
-fn limit(v: Vec3, len: f32) -> Vec3 {
-    if v.length() > len {
-        return v.normalize() * len;
-    }
-    return v;
-}
-
+#[derive(Component)]
+struct UnadjustedMaterial;
 
 #[derive(Component)]
 struct Velocity {
@@ -55,6 +48,13 @@ struct Acceleration {
 }
 
 
+
+fn limit(v: Vec3, len: f32) -> Vec3 {
+    if v.length() > len {
+        return v.normalize() * len;
+    }
+    return v;
+}
 
 const BOID_RADIUS: f32 = 20.0;
 
@@ -200,7 +200,8 @@ fn move_by_velocity(
 
 
 fn adjust_by_aabb(
-    mut query: Query<(Entity, &mut Transform), With<ModelEntity>>,
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut Transform), With<UnadjustedAABB>>,
     children: Query<&Children>,
     bounding_boxes: Query<&Aabb>,
 ) {
@@ -217,6 +218,23 @@ fn adjust_by_aabb(
         if count > 0 {
             let center = (min + max) * 0.5;
             transform.translation = transform.with_translation(Vec3::ZERO).transform_point(Vec3::from(-center));
+        }
+        commands.entity(entity).remove::<UnadjustedAABB>();
+    }
+}
+
+fn adjust_materials(
+    mut query: Query<Entity, With<UnadjustedMaterial>>,
+    children: Query<&Children>,
+    meshes: Query<&Handle<StandardMaterial>, With<Handle<Mesh>>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for entity in &mut query {
+        for child in children.iter_descendants(entity) {
+            if let Ok(material_handle) = meshes.get(child) {
+                let material = materials.get_mut(material_handle).unwrap();
+                material.unlit = true;
+            }
         }
     }
 }
@@ -247,6 +265,7 @@ fn main() {
                 update_spatial_index.after(update_cell_association),
                 adjust_by_aabb,
                 skybox_system,
+                adjust_materials,
                 test_spatial_index,
                 update_cursor_ground_plane_position,
                 close_on_esc
@@ -258,16 +277,6 @@ fn main() {
 
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
-            illuminance: 32000.0,
-            ..default()
-        },
-        transform: Transform::from_xyz(0.0, 20.0, 0.0)
-            .with_rotation(Quat::from_rotation_x(-PI / 4.)),
-        ..default()
-    });
-    
     let image_handle = asset_server.load("space_cubemap.png");
     commands.insert_resource(SkyboxResource {
         is_loaded: false,
@@ -299,7 +308,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // environment map, use an appropriate color and brightness to match
     commands.insert_resource(AmbientLight {
         color: Color::rgb_u8(210, 220, 240),
-        brightness: 1.0,
+        brightness: 100.0,
     });
 
     let destroyer_scene = asset_server.load("destroyer.glb#Scene0");
@@ -316,6 +325,47 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             spawn_ship(&mut commands, lowpoly2_scene.clone(), position, velocity, PI*0.5, 0.1);
         }
     }
+
+    let sun_scene = asset_server.load("sun.glb#Scene0");
+    spawn_sun(&mut commands, sun_scene, Vec3::new(0.0, 5.0, 0.0), 10.0);
+
+    let jupiter_scene = asset_server.load("jupiter.glb#Scene0");
+    spawn_model(&mut commands, jupiter_scene, Vec3::new(100.0, -15.0, 0.0), 1.0);
+}
+
+
+
+
+fn spawn_sun(commands: &mut Commands, scene: Handle<Scene>, position: Vec3, scale: f32) {
+    commands.spawn(PointLightBundle {
+        transform: Transform::from_translation(position),
+        point_light: PointLight {
+            range: 100_000.0,
+            intensity: 100_000_000.0,
+            radius: 1.1,
+            color: Color::WHITE,
+            shadows_enabled: true,
+            ..default()
+        },
+        ..default()
+    }).with_children(|parent| {
+        parent.spawn((
+            UnadjustedMaterial,
+            SceneBundle {
+                scene,
+                transform: Transform::from_translation(Vec3::new(0.0, -20., 0.0)).with_scale(Vec3::ONE * scale),
+                ..default()
+            }
+        ));
+    });
+}
+
+fn spawn_model(commands: &mut Commands, scene: Handle<Scene>, position: Vec3, scale: f32) {
+    commands.spawn(SceneBundle {
+        scene,
+        transform: Transform::from_translation(position).with_scale(Vec3::ONE * scale),
+        ..default()
+    });
 }
 
 
@@ -337,7 +387,7 @@ fn spawn_ship(commands: &mut Commands, scene: Handle<Scene>, position: Vec3, vel
         }
     )).with_children(|parent| {
         parent.spawn((
-            ModelEntity,
+            UnadjustedAABB,
             SceneBundle {
                 scene,
                 transform: Transform::from_rotation(Quat::from_axis_angle(Vec3::Y, angle)).with_scale(Vec3::ONE * scale),
